@@ -5,8 +5,15 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import java.util.UUID
 
-class RbacRepository(private val rbacDao: RbacDao) {
+class RbacRepository(
+    private val rbacDao: RbacDao,
+    private val fileCacheDao: FileCacheDao,
+    private val userSessionDao: UserSessionDao
+) {
+
+    // --- RBAC User & Role Flows ---
 
     val allUsers: Flow<List<UserEntity>> = rbacDao.getAllUsers()
 
@@ -50,11 +57,9 @@ class RbacRepository(private val rbacDao: RbacDao) {
     }
 
     val allAuditLogs: Flow<List<AuditLogEntity>> = rbacDao.getAllAuditLogs()
-
     suspend fun insertAuditLog(log: AuditLogEntity) = rbacDao.insertAuditLog(log)
 
     val allSystemActivities: Flow<List<SystemActivityEntity>> = rbacDao.getAllSystemActivities()
-
     suspend fun insertSystemActivity(activity: SystemActivityEntity) = rbacDao.insertSystemActivity(activity)
 
     suspend fun insertUser(user: UserEntity) = rbacDao.insertUser(user)
@@ -62,13 +67,68 @@ class RbacRepository(private val rbacDao: RbacDao) {
     suspend fun insertPermission(permission: PermissionEntity) = rbacDao.insertPermission(permission)
     suspend fun insertRolePermissionCrossRef(crossRef: RolePermissionCrossRef) = rbacDao.insertRolePermissionCrossRef(crossRef)
 
+    // --- File Cache Repository Methods for High-Performance Engine Access ---
+
+    val allCachedFiles: Flow<List<CachedFileEntity>> = fileCacheDao.getAllCachedFiles()
+
+    fun getCachedFileByIdFlow(fileId: String): Flow<CachedFileEntity?> = fileCacheDao.getCachedFileByIdFlow(fileId)
+
+    suspend fun getCachedFileById(fileId: String): CachedFileEntity? = fileCacheDao.getCachedFileById(fileId)
+
+    suspend fun getFileByChecksum(checksum: String): CachedFileEntity? = fileCacheDao.getFileByChecksum(checksum)
+
+    suspend fun insertCachedFile(file: CachedFileEntity) = fileCacheDao.insertCachedFile(file)
+
+    suspend fun insertCachedRecords(records: List<CachedRecordEntity>) = fileCacheDao.insertCachedRecords(records)
+
+    suspend fun deleteCachedFile(fileId: String) = fileCacheDao.deleteCachedFile(fileId)
+
+    suspend fun clearAllCachedFiles() = fileCacheDao.clearAllCachedFiles()
+
+    fun getRecordsForFileFlow(fileId: String): Flow<List<CachedRecordEntity>> = fileCacheDao.getRecordsForFileFlow(fileId)
+
+    suspend fun getRecordsPaged(fileId: String, limit: Int, offset: Int): List<CachedRecordEntity> =
+        fileCacheDao.getRecordsPaged(fileId, limit, offset)
+
+    fun getAnomaliesForFileFlow(fileId: String): Flow<List<CachedRecordEntity>> = fileCacheDao.getAnomaliesForFileFlow(fileId)
+
+    suspend fun getDepartmentBreakdown(fileId: String): List<DeptCountResult> = fileCacheDao.getDepartmentBreakdown(fileId)
+
+    suspend fun getPerformanceBreakdown(fileId: String): List<PerfCountResult> = fileCacheDao.getPerformanceBreakdown(fileId)
+
+    suspend fun updateLastAccessed(fileId: String) = fileCacheDao.updateLastAccessed(fileId)
+
+    // --- User Session Repository Methods ---
+
+    val activeSession: Flow<UserSessionEntity?> = userSessionDao.getActiveSessionFlow()
+
+    val allSessions: Flow<List<UserSessionEntity>> = userSessionDao.getAllSessionsFlow()
+
+    suspend fun getActiveSession(): UserSessionEntity? = userSessionDao.getActiveSession()
+
+    fun getSessionsForUser(email: String): Flow<List<UserSessionEntity>> = userSessionDao.getSessionsForUser(email)
+
+    suspend fun insertSession(session: UserSessionEntity) = userSessionDao.insertSession(session)
+
+    suspend fun touchSession(sessionId: String) = userSessionDao.touchSession(sessionId)
+
+    suspend fun deactivateSession(sessionId: String) = userSessionDao.deactivateSession(sessionId)
+
+    suspend fun deactivateAllSessionsForUser(email: String) = userSessionDao.deactivateAllSessionsForUser(email)
+
+    suspend fun updateSessionPortal(sessionId: String, portal: String) = userSessionDao.updateActivePortal(sessionId, portal)
+
+    suspend fun cleanupOldSessions(cutoffTime: Long) = userSessionDao.cleanupOldSessions(cutoffTime)
+
+    suspend fun clearAllSessions() = userSessionDao.clearAllSessions()
+
     /**
-     * Seeds initial roles, permissions, role-permission mappings, and users if the database is unpopulated.
+     * Seeds initial roles, permissions, role-permission mappings, users,
+     * sample cached files and user sessions if database is unpopulated.
      */
     suspend fun seedInitialDataIfEmpty() {
         val existingUsers = rbacDao.getAllUsers().firstOrNull()
         if (!existingUsers.isNullOrEmpty()) {
-            // Already seeded
             return
         }
 
@@ -168,7 +228,7 @@ class RbacRepository(private val rbacDao: RbacDao) {
         // 6. Seed System Activities and File Jobs
         val initialActivities = listOf(
             SystemActivityEntity(
-                timestamp = System.currentTimeMillis() - 14400000, // 4 hours ago
+                timestamp = System.currentTimeMillis() - 14400000,
                 activityType = "FILE_PROCESSING",
                 title = "Parsed quarterly billing ledger (timesheet_q2_raw.csv)",
                 status = "SUCCESS",
@@ -177,7 +237,7 @@ class RbacRepository(private val rbacDao: RbacDao) {
                 operatorEmail = "david.miller@korvix.com"
             ),
             SystemActivityEntity(
-                timestamp = System.currentTimeMillis() - 10800000, // 3 hours ago
+                timestamp = System.currentTimeMillis() - 10800000,
                 activityType = "SECURITY_ALERT",
                 title = "Executed global digital signature compliance scan",
                 status = "SUCCESS",
@@ -186,7 +246,7 @@ class RbacRepository(private val rbacDao: RbacDao) {
                 operatorEmail = "david.miller@korvix.com"
             ),
             SystemActivityEntity(
-                timestamp = System.currentTimeMillis() - 7200000, // 2 hours ago
+                timestamp = System.currentTimeMillis() - 7200000,
                 activityType = "FILE_PROCESSING",
                 title = "Ingested employee roster update (payroll_records.csv)",
                 status = "SUCCESS",
@@ -195,7 +255,7 @@ class RbacRepository(private val rbacDao: RbacDao) {
                 operatorEmail = "sarah.hr@korvix.com"
             ),
             SystemActivityEntity(
-                timestamp = System.currentTimeMillis() - 3600000, // 1 hour ago
+                timestamp = System.currentTimeMillis() - 3600000,
                 activityType = "COMPLIANCE_SYNC",
                 title = "Rotated HSM cryptography log keys",
                 status = "SUCCESS",
@@ -205,5 +265,59 @@ class RbacRepository(private val rbacDao: RbacDao) {
             )
         )
         initialActivities.forEach { rbacDao.insertSystemActivity(it) }
+
+        // 7. Seed Initial Room Cached Files for High-Performance File Parsing Engine
+        val seededFileId = "file_seed_001"
+        val sampleMockData = CSVProcessor.generateMockCSVBytes()
+        val sampleChecksum = CSVProcessor.calculateChecksum(sampleMockData)
+        val initialCachedFile = CachedFileEntity(
+            fileId = seededFileId,
+            fileName = "timesheet_q2_raw.csv",
+            fileType = "text/csv",
+            fileSizeBytes = sampleMockData.size.toLong(),
+            uploadedAt = System.currentTimeMillis() - 14400000L,
+            uploadedBy = "david.miller@korvix.com",
+            recordCount = 10000,
+            checksum = sampleChecksum,
+            rawContent = "department,date,performance\nEngineering,16 May 2024,Good\nSales,15 May 2024,Very Good\n...",
+            cacheStatus = "CACHED",
+            lastAccessedAt = System.currentTimeMillis() - 600000L,
+            parsingDurationMs = 118L,
+            summaryJson = null
+        )
+        fileCacheDao.insertCachedFile(initialCachedFile)
+
+        // Seed 10 sample indexed records for immediate query testing
+        val sampleRecords = listOf(
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 1, department = "Engineering", recordDate = "16 May 2024", performanceRating = "Good"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 2, department = "Sales", recordDate = "15 May 2024", performanceRating = "Very Good"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 3, department = "HR", recordDate = "14 May 2024", performanceRating = "Excellent"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 4, department = "Finance", recordDate = "13 May 2024", performanceRating = "Good"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 5, department = "Marketing", recordDate = "12 May 2024", performanceRating = "Needs Improvement"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 6, department = "Legal", recordDate = "11 May 2024", performanceRating = "Unsatisfactory", hasAnomaly = true, anomalyDetails = "Elevated dissatisfaction threshold"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 7, department = "", recordDate = "16 May 2024", performanceRating = "Excellent", hasAnomaly = true, anomalyDetails = "Missing department"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 8, department = "Engineering", recordDate = "", performanceRating = "Good", hasAnomaly = true, anomalyDetails = "Missing date"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 9, department = "Sales", recordDate = "15 May 2024", performanceRating = "", hasAnomaly = true, anomalyDetails = "Missing rating"),
+            CachedRecordEntity(fileId = seededFileId, rowIndex = 10, department = "Finance", recordDate = "10 May 2024", performanceRating = "Very Good")
+        )
+        fileCacheDao.insertCachedRecords(sampleRecords)
+
+        // 8. Seed Initial User Session in Room
+        val initialSession = UserSessionEntity(
+            sessionId = "sess_" + UUID.randomUUID().toString().take(8),
+            userEmail = "david.miller@korvix.com",
+            userName = "David Miller",
+            userRole = "ADMIN",
+            department = "All",
+            sessionToken = "kvx_tk_" + UUID.randomUUID().toString().replace("-", ""),
+            createdAt = System.currentTimeMillis() - 7200000L,
+            lastActiveAt = System.currentTimeMillis() - 120000L,
+            expiresAt = System.currentTimeMillis() + 79200000L,
+            isActive = true,
+            deviceInfo = "KORVIX Workstation Terminal (Android/Compose)",
+            ipAddress = "10.142.0.4",
+            activePortal = "ADMIN"
+        )
+        userSessionDao.insertSession(initialSession)
     }
 }

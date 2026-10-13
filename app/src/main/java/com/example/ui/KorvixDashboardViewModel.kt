@@ -1,25 +1,20 @@
 package com.example.ui
 
 import android.app.Application
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.api.GeminiService
 import com.example.data.*
-import com.example.data.database.RbacDatabase
-import com.example.data.database.UserEntity
-import com.example.data.database.RoleWithPermissions
-import com.example.data.database.AuditLogEntity
-import com.example.data.database.SystemActivityEntity
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.stateIn
+import com.example.data.database.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.*
 
@@ -45,7 +40,11 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
 
     // --- Repositories & Database ---
     private val rbacDatabase = RbacDatabase.getDatabase(application)
-    private val rbacRepository = RbacRepository(rbacDatabase.rbacDao())
+    private val rbacRepository = RbacRepository(
+        rbacDatabase.rbacDao(),
+        rbacDatabase.fileCacheDao(),
+        rbacDatabase.userSessionDao()
+    )
     private val rbacPermissionService = RbacPermissionService(rbacRepository)
     private val geminiRepository: GeminiRepository = GeminiRepositoryImpl()
 
@@ -78,6 +77,28 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
             initialValue = emptyList()
         )
 
+    // --- Room Database Cached Files & User Sessions Flows ---
+    val dbCachedFiles: StateFlow<List<CachedFileEntity>> = rbacRepository.allCachedFiles
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    val dbActiveSession: StateFlow<UserSessionEntity?> = rbacRepository.activeSession
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = null
+        )
+
+    val dbAllSessions: StateFlow<List<UserSessionEntity>> = rbacRepository.allSessions
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
     // --- Authentication & User Profiles ---
     private val _currentUser = MutableStateFlow<UserProfile?>(null)
     val currentUser: StateFlow<UserProfile?> = _currentUser.asStateFlow()
@@ -87,6 +108,8 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
 
     private val _currentViewRole = MutableStateFlow(UserRole.ADMIN) // View Portal switcher
     val currentViewRole: StateFlow<UserRole> = _currentViewRole.asStateFlow()
+
+    private var currentSessionId: String? = null
 
     // --- Search & Global Stats ---
     val searchQuery = MutableStateFlow("")
@@ -100,6 +123,9 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
 
     private val _customAggregatedData = MutableStateFlow<AggregatedData?>(null)
     val customAggregatedData: StateFlow<AggregatedData?> = _customAggregatedData.asStateFlow()
+
+    private val _cachePerformanceStatus = MutableStateFlow<String?>("Room SQLite Cache: Initialized & Indexed")
+    val cachePerformanceStatus: StateFlow<String?> = _cachePerformanceStatus.asStateFlow()
 
     // --- Toast Notifications flow for parsing/AI anomalies ---
     private val _toastNotification = MutableSharedFlow<String>()
@@ -134,19 +160,51 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
                 }
             }
         }
-
-        // Start with null currentUser to show the secure Login Portal first
-        // loginUser("david.miller@korvix.com", "David Miller", UserRole.ADMIN)
     }
 
     fun loginUser(email: String, name: String, role: UserRole) {
-        _currentUser.value = UserProfile(email, name, role)
+        val userDept = when (role) {
+            UserRole.ADMIN -> "All"
+            UserRole.HR -> "Human Resources"
+            UserRole.SECRETARY -> "Administration"
+            UserRole.EMPLOYEE -> "Engineering"
+        }
+        val profile = UserProfile(email, name, role, userDept)
+        _currentUser.value = profile
         _currentViewRole.value = role // Automatically align portal view to user role
+        
+        // Create Room UserSessionEntity
+        val sessionId = "sess_" + UUID.randomUUID().toString().take(8)
+        val sessionToken = "kvx_tk_" + UUID.randomUUID().toString().replace("-", "")
+        currentSessionId = sessionId
+
+        val sessionEntity = UserSessionEntity(
+            sessionId = sessionId,
+            userEmail = email,
+            userName = name,
+            userRole = role.name,
+            department = userDept,
+            sessionToken = sessionToken,
+            createdAt = System.currentTimeMillis(),
+            lastActiveAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + 86400000L,
+            isActive = true,
+            deviceInfo = "KORVIX Workstation Client (Android/Compose)",
+            ipAddress = "10.142.0.4",
+            activePortal = role.name
+        )
+
+        viewModelScope.launch {
+            // Deactivate previous active sessions for this user to maintain single active session policy
+            rbacRepository.deactivateAllSessionsForUser(email)
+            rbacRepository.insertSession(sessionEntity)
+        }
+
         logAuditAction("LOGIN", "User logged in successfully as $name ($role)", "SUCCESS", email, role.name)
         
         // Reset chat history with friendly introduction matching role
         val initialGreeting = when (role) {
-            UserRole.ADMIN -> "Welcome back, Administrator **$name**. Root node authorization confirmed. You have unrestricted access to all HR logs, audit systems, and Gemini-3.5 strategic parsing capabilities. How can KORVIX optimize your workload today?"
+            UserRole.ADMIN -> "Welcome back, Administrator **$name**. Root node authorization confirmed. You have unrestricted access to all HR logs, audit systems, Room cached files, and Gemini-3.5 strategic parsing capabilities. How can KORVIX optimize your workload today?"
             UserRole.HR -> "Hello **$name** from HR. Leave logs, team distributions, and present lists are updated. Ask me to draft communications or analyze Q2 joiner rates."
             UserRole.SECRETARY -> "Good day, Office Secretary **$name**. Board room schedule and document pending statuses are synchronized. I can help sort document priorities."
             UserRole.EMPLOYEE -> "Hi **$name**, welcome to your personalized Korvix Workspace. Your attendance card and payslip details are ready. Let's make today productive!"
@@ -155,9 +213,16 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun logout() {
-        _currentUser.value?.let { user ->
+        val user = _currentUser.value
+        if (user != null) {
             logAuditAction("LOGOUT", "User logged out: ${user.name}", "SUCCESS", user.email, user.role.name)
+            currentSessionId?.let { sId ->
+                viewModelScope.launch {
+                    rbacRepository.deactivateSession(sId)
+                }
+            }
         }
+        currentSessionId = null
         _currentUser.value = null
     }
 
@@ -174,57 +239,115 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
         
         if (isAuthorized) {
             _currentViewRole.value = role
+            currentSessionId?.let { sId ->
+                viewModelScope.launch {
+                    rbacRepository.updateSessionPortal(sId, role.name)
+                }
+            }
             logAuditAction("SWITCH_PORTAL", "Switched view to portal ${role.name}", "SUCCESS", user.email, user.role.name)
         } else {
             logAuditAction("SWITCH_PORTAL", "Blocked unauthorized attempt to switch view to portal ${role.name}", "DENIED", user.email, user.role.name)
         }
     }
 
-    // --- CSV High-Performance Stream Parsing ---
-    fun simulateCSVFileUpload() {
+    // --- CSV High-Performance Stream Parsing with Room DB Caching Engine ---
+    fun simulateCSVFileUpload(forceRefresh: Boolean = false) {
         logAuditAction("FILE_UPLOAD", "User uploaded data file for parsing (10,000 corporate records)", "SUCCESS")
         viewModelScope.launch {
             _isStreamingData.value = true
             _streamingProgress.value = 0f
 
-            // Generate the mock CSV stream of 10,000 rows
-            val csvStream = CSVProcessor.generateMockCSVStream()
+            val mockBytes = CSVProcessor.generateMockCSVBytes()
+            val checksum = CSVProcessor.calculateChecksum(mockBytes)
 
-            // Parse and aggregate in the background
-            val result = CSVProcessor.parseAndAggregate(csvStream) { progress ->
+            // Step 1: Check Room Cache for high-performance access
+            val existingCachedFile = if (!forceRefresh) rbacRepository.getFileByChecksum(checksum) else null
+            if (existingCachedFile != null && existingCachedFile.summaryJson != null) {
+                // --- ROOM CACHE HIT (HIGH-PERFORMANCE SUB-MILLISECOND RETRIEVAL) ---
+                val hitStartTime = System.currentTimeMillis()
+                val cachedAggregated = CSVProcessor.deserializeAggregatedData(existingCachedFile.summaryJson)
+                val hitDuration = System.currentTimeMillis() - hitStartTime
+                rbacRepository.updateLastAccessed(existingCachedFile.fileId)
+
+                _customAggregatedData.value = cachedAggregated
+                _isStreamingData.value = false
+                _streamingProgress.value = 1f
+                _cachePerformanceStatus.value = "⚡ SQLite Cache Hit: Retrieved 10,000 records from Room B-Tree in ${hitDuration}ms"
+
+                rbacRepository.insertSystemActivity(
+                    SystemActivityEntity(
+                        timestamp = System.currentTimeMillis(),
+                        activityType = "FILE_PROCESSING",
+                        title = "High-speed Room cache hit for ${existingCachedFile.fileName}",
+                        status = "SUCCESS",
+                        recordsProcessed = cachedAggregated.totalRowsParsed,
+                        durationMs = hitDuration,
+                        operatorEmail = _currentUser.value?.email ?: "SYSTEM"
+                    )
+                )
+
+                _toastNotification.emit("⚡ Room Cache Hit: Loaded 10,000 records from SQLite in ${hitDuration}ms!")
+
+                val summaryText = """
+                    ⚡ **KORVIX High-Performance File Engine: Instant Cache Hit!**
+                    - File: **${existingCachedFile.fileName}**
+                    - Storage: **Room SQLite Database (Table: cached_files, cached_records)**
+                    - Retrieval Latency: **${hitDuration}ms** (Zero CPU re-parsing overhead)
+                    - Integrity Checksum: **${existingCachedFile.checksum.take(16)}...**
+                    - Cached Rows: **${cachedAggregated.totalRowsParsed} records**
+                """.trimIndent()
+                _chatHistory.value = _chatHistory.value + ChatMessage("korvix_ai", summaryText)
+                return@launch
+            }
+
+            // Step 2: Cache Miss - Stream parse and index into Room database
+            val fileId = "file_" + UUID.randomUUID().toString().take(8)
+            val parseResult = CSVProcessor.parseAndExtractRecords(
+                bytes = mockBytes,
+                fileName = "timesheet_q2_enterprise.csv",
+                fileId = fileId,
+                uploadedBy = _currentUser.value?.email ?: "SYSTEM"
+            ) { progress ->
                 _streamingProgress.value = progress
             }
 
-            _customAggregatedData.value = result
+            // High-performance batched Room database insertion
+            rbacRepository.insertCachedFile(parseResult.cachedFile)
+            parseResult.records.chunked(1000).forEach { chunk ->
+                rbacRepository.insertCachedRecords(chunk)
+            }
+
+            _customAggregatedData.value = parseResult.aggregatedData
             _isStreamingData.value = false
+            _cachePerformanceStatus.value = "💾 Room Cache Stored: Parsed & indexed 10,000 records into SQLite (${parseResult.cachedFile.parsingDurationMs}ms)"
 
             // Add an entry in Room Database system_activities table
             rbacRepository.insertSystemActivity(
                 SystemActivityEntity(
                     timestamp = System.currentTimeMillis(),
                     activityType = "FILE_PROCESSING",
-                    title = "Parsed streamed high-performance CSV file (10,000 records)",
+                    title = "Parsed & indexed 10,000 records into Room database (${parseResult.cachedFile.fileName})",
                     status = "SUCCESS",
-                    recordsProcessed = result.totalRowsParsed,
-                    durationMs = 124L,
+                    recordsProcessed = parseResult.aggregatedData.totalRowsParsed,
+                    durationMs = parseResult.cachedFile.parsingDurationMs,
                     operatorEmail = _currentUser.value?.email ?: "SYSTEM"
                 )
             )
 
             // Trigger Toast notifications sequentially for each identified anomaly
-            if (result.anomalies.isNotEmpty()) {
+            if (parseResult.aggregatedData.anomalies.isNotEmpty()) {
                 viewModelScope.launch {
-                    result.anomalies.forEach { anomaly ->
+                    parseResult.aggregatedData.anomalies.forEach { anomaly ->
                         _toastNotification.emit(anomaly)
-                        delay(2500) // Paced timing for human readability
+                        delay(2500)
                     }
                 }
             }
 
-            // Append completion status message from Korvix AI Assistant in Chat
-            val anomalySection = if (result.anomalies.isNotEmpty()) {
+            // Append completion status message in Chat
+            val anomalySection = if (parseResult.aggregatedData.anomalies.isNotEmpty()) {
                 "\n\n⚠️ **CRITICAL ANOMALIES & MISSING DATA PATTERNS IDENTIFIED:**\n" + 
-                result.anomalies.joinToString("\n") { "• $it" }
+                parseResult.aggregatedData.anomalies.joinToString("\n") { "• $it" }
             } else {
                 ""
             }
@@ -233,12 +356,13 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
                 📊 **KORVIX AI assistant has completed stream parsing!**
                 
                 **Summary Metrics:**
-                - Total Rows Streamed: **${result.totalRowsParsed} records**
-                - Time: **Sub-second pipeline parsing (Default background thread)**
-                - Department Distribution: ${result.deptDistribution.joinToString { "**${it.name}** (${it.count})" }}
-                - Performance Rating: ${result.performanceMetrics.joinToString { "**${it.rating}** (${it.count})" }}$anomalySection
+                - Total Rows Streamed: **${parseResult.aggregatedData.totalRowsParsed} records**
+                - Room Cache: **Indexed in SQLite (cached_files & cached_records tables)**
+                - Parse Duration: **${parseResult.cachedFile.parsingDurationMs}ms**
+                - Department Distribution: ${parseResult.aggregatedData.deptDistribution.joinToString { "**${it.name}** (${it.count})" }}
+                - Performance Rating: ${parseResult.aggregatedData.performanceMetrics.joinToString { "**${it.rating}** (${it.count})" }}$anomalySection
                 
-                Active dashboard Recharts (Compose Canvas charts) have been updated dynamically with this aggregated dataset. Let me know if you want a strategic summary of Q2 metrics!
+                All records are now persistently cached in the on-device Room SQLite database. Subsequent accesses will yield sub-millisecond retrieval!
             """.trimIndent()
             
             _chatHistory.value = _chatHistory.value + ChatMessage("korvix_ai", formattedSummary)
@@ -247,6 +371,25 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
 
     fun clearUploadedData() {
         _customAggregatedData.value = null
+    }
+
+    fun clearRoomFileCache() {
+        viewModelScope.launch {
+            rbacRepository.clearAllCachedFiles()
+            _customAggregatedData.value = null
+            _cachePerformanceStatus.value = "Room SQLite Cache Purged"
+            logSystemActivity("FILE_PROCESSING", "Cleared all cached files from Room SQLite database", "SUCCESS", 0, 10L)
+            _toastNotification.emit("Room database file cache cleared successfully")
+        }
+    }
+
+    fun terminateSession(sessionId: String) {
+        viewModelScope.launch {
+            rbacRepository.deactivateSession(sessionId)
+            if (currentSessionId == sessionId) {
+                logout()
+            }
+        }
     }
 
     // --- AI Assistant Chat Submission with Backend Security Interceptor ---
@@ -258,6 +401,13 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
         _chatHistory.value = updatedHistory
 
         val activeRole = _currentUser.value?.role ?: UserRole.EMPLOYEE
+
+        // Touch active user session in Room
+        currentSessionId?.let { sId ->
+            viewModelScope.launch {
+                rbacRepository.touchSession(sId)
+            }
+        }
 
         // --- BACKEND RBAC SECURITY INTERCEPTOR (CRITICAL RULE) ---
         if (activeRole == UserRole.EMPLOYEE) {
@@ -285,7 +435,7 @@ class KorvixDashboardViewModel(application: Application) : AndroidViewModel(appl
                 Your response style is crisp, highly professional, corporate, and strategic.
                 Use clear markdown bullet points and structured analysis.
                 The active user role portal is: $activeRole. Ensure your answer is tailored to this role.
-                If they ask about data analysis, refer to their high-performance aggregated metrics of 10,000+ data nodes.
+                If they ask about data analysis, refer to their high-performance Room SQLite aggregated metrics of 10,000+ data nodes.
             """.trimIndent()
 
             val aiAnswer = geminiRepository.getAssistantResponse(prompt, systemInstruction)

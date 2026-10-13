@@ -1,11 +1,16 @@
 package com.example.data
 
+import com.example.data.database.CachedFileEntity
+import com.example.data.database.CachedRecordEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.security.MessageDigest
 import kotlin.random.Random
 
 data class AggregatedData(
@@ -20,19 +25,35 @@ data class DeptCount(val name: String, val count: Int, val percentage: String)
 data class PerformanceCount(val rating: String, val count: Int, val percentage: String)
 data class DateTrendCount(val date: String, val count: Int)
 
+data class ParsedFileResult(
+    val aggregatedData: AggregatedData,
+    val cachedFile: CachedFileEntity,
+    val records: List<CachedRecordEntity>,
+    val isCacheHit: Boolean = false
+)
+
 object CSVProcessor {
 
     /**
-     * Generates a mock CSV with 10,000 records of enterprise data.
+     * Calculates SHA-256 checksum for byte payload to ensure data integrity and instant cache lookup.
+     */
+    fun calculateChecksum(bytes: ByteArray): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        val digest = md.digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Generates a mock CSV with 10,000 records of enterprise data as raw ByteArray.
      * Intentionally injects missing data patterns and critical anomalies for AI detection.
      */
-    fun generateMockCSVStream(): InputStream {
+    fun generateMockCSVBytes(): ByteArray {
         val departments = listOf("Engineering", "Sales", "HR", "Finance", "Marketing", "Legal")
         val performanceLevels = listOf("Excellent", "Very Good", "Good", "Needs Improvement", "Unsatisfactory")
         val baseDate = 1715817600000L // 16 May 2024
         val msInDay = 86400000L
 
-        val stringBuilder = java.lang.StringBuilder()
+        val stringBuilder = java.lang.StringBuilder(350000)
         stringBuilder.append("department,date,performance\n")
 
         for (i in 1..10000) {
@@ -73,7 +94,94 @@ object CSVProcessor {
             stringBuilder.append("$dept,$dateStr,$perf\n")
         }
 
-        return stringBuilder.toString().byteInputStream()
+        return stringBuilder.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /**
+     * Generates a mock CSV with 10,000 records of enterprise data.
+     */
+    fun generateMockCSVStream(): InputStream {
+        return generateMockCSVBytes().inputStream()
+    }
+
+    /**
+     * Serializes AggregatedData into lightweight JSON for Room database caching.
+     */
+    fun serializeAggregatedData(data: AggregatedData): String {
+        val json = JSONObject()
+        json.put("totalRowsParsed", data.totalRowsParsed)
+        
+        val deptArray = JSONArray()
+        data.deptDistribution.forEach {
+            val obj = JSONObject()
+            obj.put("name", it.name)
+            obj.put("count", it.count)
+            obj.put("percentage", it.percentage)
+            deptArray.put(obj)
+        }
+        json.put("deptDistribution", deptArray)
+
+        val perfArray = JSONArray()
+        data.performanceMetrics.forEach {
+            val obj = JSONObject()
+            obj.put("rating", it.rating)
+            obj.put("count", it.count)
+            obj.put("percentage", it.percentage)
+            perfArray.put(obj)
+        }
+        json.put("performanceMetrics", perfArray)
+
+        val dateArray = JSONArray()
+        data.dateTrend.forEach {
+            val obj = JSONObject()
+            obj.put("date", it.date)
+            obj.put("count", it.count)
+            dateArray.put(obj)
+        }
+        json.put("dateTrend", dateArray)
+
+        val anomalyArray = JSONArray()
+        data.anomalies.forEach { anomalyArray.put(it) }
+        json.put("anomalies", anomalyArray)
+
+        return json.toString()
+    }
+
+    /**
+     * Deserializes AggregatedData from Room database cached summary.
+     */
+    fun deserializeAggregatedData(jsonStr: String): AggregatedData {
+        val json = JSONObject(jsonStr)
+        val total = json.getInt("totalRowsParsed")
+        
+        val deptList = mutableListOf<DeptCount>()
+        val deptArray = json.optJSONArray("deptDistribution") ?: JSONArray()
+        for (i in 0 until deptArray.length()) {
+            val obj = deptArray.getJSONObject(i)
+            deptList.add(DeptCount(obj.getString("name"), obj.getInt("count"), obj.getString("percentage")))
+        }
+
+        val perfList = mutableListOf<PerformanceCount>()
+        val perfArray = json.optJSONArray("performanceMetrics") ?: JSONArray()
+        for (i in 0 until perfArray.length()) {
+            val obj = perfArray.getJSONObject(i)
+            perfList.add(PerformanceCount(obj.getString("rating"), obj.getInt("count"), obj.getString("percentage")))
+        }
+
+        val dateList = mutableListOf<DateTrendCount>()
+        val dateArray = json.optJSONArray("dateTrend") ?: JSONArray()
+        for (i in 0 until dateArray.length()) {
+            val obj = dateArray.getJSONObject(i)
+            dateList.add(DateTrendCount(obj.getString("date"), obj.getInt("count")))
+        }
+
+        val anomalyList = mutableListOf<String>()
+        val anomalyArray = json.optJSONArray("anomalies") ?: JSONArray()
+        for (i in 0 until anomalyArray.length()) {
+            anomalyList.add(anomalyArray.getString(i))
+        }
+
+        return AggregatedData(total, deptList, perfList, dateList, anomalyList)
     }
 
     /**
@@ -81,6 +189,62 @@ object CSVProcessor {
      * Identifies critical anomalies and missing data patterns.
      */
     suspend fun parseAndAggregate(inputStream: InputStream, onProgress: (Float) -> Unit = {}): AggregatedData = withContext(Dispatchers.Default) {
+        val result = parseInternal(inputStream, fileId = "temp", onProgress)
+        result.first
+    }
+
+    /**
+     * High-performance parsing and record extraction for Room SQLite caching.
+     * Returns both the aggregated analytical structure and the individual parsed records
+     * ready for batched insertion into Room.
+     */
+    suspend fun parseAndExtractRecords(
+        bytes: ByteArray,
+        fileName: String,
+        fileId: String,
+        uploadedBy: String,
+        onProgress: (Float) -> Unit = {}
+    ): ParsedFileResult = withContext(Dispatchers.Default) {
+        val startTime = System.currentTimeMillis()
+        val checksum = calculateChecksum(bytes)
+        val (aggregated, records) = parseInternal(bytes.inputStream(), fileId = fileId, onProgress = onProgress)
+        val duration = System.currentTimeMillis() - startTime
+
+        val rawPreview = if (bytes.size > 2048) {
+            String(bytes.take(2048).toByteArray(), Charsets.UTF_8) + "\n...[truncated preview]"
+        } else {
+            String(bytes, Charsets.UTF_8)
+        }
+
+        val cachedFile = CachedFileEntity(
+            fileId = fileId,
+            fileName = fileName,
+            fileType = "text/csv",
+            fileSizeBytes = bytes.size.toLong(),
+            uploadedAt = System.currentTimeMillis(),
+            uploadedBy = uploadedBy,
+            recordCount = aggregated.totalRowsParsed,
+            checksum = checksum,
+            rawContent = rawPreview,
+            cacheStatus = "CACHED",
+            lastAccessedAt = System.currentTimeMillis(),
+            parsingDurationMs = duration,
+            summaryJson = serializeAggregatedData(aggregated)
+        )
+
+        ParsedFileResult(
+            aggregatedData = aggregated,
+            cachedFile = cachedFile,
+            records = records,
+            isCacheHit = false
+        )
+    }
+
+    private suspend fun parseInternal(
+        inputStream: InputStream,
+        fileId: String,
+        onProgress: (Float) -> Unit
+    ): Pair<AggregatedData, List<CachedRecordEntity>> {
         val reader = BufferedReader(InputStreamReader(inputStream))
         var line = reader.readLine() // Header
 
@@ -99,9 +263,9 @@ object CSVProcessor {
             "Unsatisfactory" to 0
         )
         val dateCounts = mutableMapOf<String, Int>()
-
-        // Map to track performance rating counts per department (for anomaly detection)
         val deptPerfCounts = mutableMapOf<String, MutableMap<String, Int>>()
+
+        val cachedRecords = ArrayList<CachedRecordEntity>(10050)
 
         // Read all lines
         while (line != null) {
@@ -111,6 +275,17 @@ object CSVProcessor {
             val columns = line.split(",")
             if (columns.size < 3) {
                 corruptRowsCount++
+                cachedRecords.add(
+                    CachedRecordEntity(
+                        fileId = fileId,
+                        rowIndex = totalRows,
+                        department = "",
+                        recordDate = "",
+                        performanceRating = "",
+                        hasAnomaly = true,
+                        anomalyDetails = "Corrupted line: insufficient columns"
+                    )
+                )
                 continue
             }
 
@@ -119,42 +294,52 @@ object CSVProcessor {
             val perf = columns[2].trim()
 
             var hasMissingData = false
+            val anomalyReasons = mutableListOf<String>()
 
             if (dept.isEmpty()) {
                 missingDeptCount++
                 hasMissingData = true
+                anomalyReasons.add("Missing department")
             }
             if (date.isEmpty()) {
                 missingDateCount++
                 hasMissingData = true
+                anomalyReasons.add("Missing date")
             }
             if (perf.isEmpty()) {
                 missingPerfCount++
                 hasMissingData = true
+                anomalyReasons.add("Missing rating")
             }
 
             if (!hasMissingData) {
-                // Aggregators for valid/partially valid rows
                 deptCounts[dept] = (deptCounts[dept] ?: 0) + 1
-                if (performanceCounts.containsKey(perf)) {
-                    performanceCounts[perf] = performanceCounts[perf]!! + 1
-                } else {
-                    performanceCounts[perf] = (performanceCounts[perf] ?: 0) + 1
-                }
+                performanceCounts[perf] = (performanceCounts[perf] ?: 0) + 1
                 dateCounts[date] = (dateCounts[date] ?: 0) + 1
 
-                // Track performance levels per department
                 val perfMap = deptPerfCounts.getOrPut(dept) { mutableMapOf() }
                 perfMap[perf] = (perfMap[perf] ?: 0) + 1
             }
 
-            // Simulate slight streaming progress chunking so the UI feels alive
+            cachedRecords.add(
+                CachedRecordEntity(
+                    fileId = fileId,
+                    rowIndex = totalRows,
+                    department = dept,
+                    recordDate = date,
+                    performanceRating = perf,
+                    hasAnomaly = hasMissingData,
+                    anomalyDetails = if (anomalyReasons.isNotEmpty()) anomalyReasons.joinToString("; ") else null
+                )
+            )
+
+            // Simulate slight streaming progress chunking so the UI feels responsive
             if (totalRows % 2000 == 0) {
                 val progress = totalRows.toFloat() / 10000f
                 withContext(Dispatchers.Main) {
                     onProgress(progress)
                 }
-                delay(80) // Visual progress pacing
+                delay(60) // Visual progress pacing
             }
         }
 
@@ -182,18 +367,17 @@ object CSVProcessor {
             if (totalInDept > 50) {
                 val ratio = unsatisfactoryCount.toFloat() / totalInDept.toFloat()
                 if (ratio > 0.35f) {
-                    val percentageStr = String.format("%.1f%%", ratio * 100f)
+                    val percentageStr = String.format(java.util.Locale.US, "%.1f%%", ratio * 100f)
                     anomalies.add("🔥 Critical Performance Anomaly: '$dept' department exhibits an unusual 'Unsatisfactory' rating concentration of $percentageStr.")
                 }
             }
         }
 
-        // Package results
         val deptList = deptCounts.map { (name, count) ->
             DeptCount(
                 name = name,
                 count = count,
-                percentage = String.format("%.1f%%", (count.toFloat() / totalRows) * 100f)
+                percentage = String.format(java.util.Locale.US, "%.1f%%", (count.toFloat() / totalRows) * 100f)
             )
         }.sortedByDescending { it.count }
 
@@ -201,7 +385,7 @@ object CSVProcessor {
             PerformanceCount(
                 rating = rating,
                 count = count,
-                percentage = String.format("%.1f%%", (count.toFloat() / totalRows) * 100f)
+                percentage = String.format(java.util.Locale.US, "%.1f%%", (count.toFloat() / totalRows) * 100f)
             )
         }
 
@@ -215,12 +399,14 @@ object CSVProcessor {
             }
         }
 
-        AggregatedData(
+        val aggregated = AggregatedData(
             totalRowsParsed = totalRows,
             deptDistribution = deptList,
             performanceMetrics = perfList,
             dateTrend = dateList,
             anomalies = anomalies
         )
+
+        return Pair(aggregated, cachedRecords)
     }
 }

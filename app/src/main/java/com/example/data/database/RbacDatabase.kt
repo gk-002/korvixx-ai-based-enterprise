@@ -170,13 +170,18 @@ interface RbacDao {
         PermissionEntity::class,
         RolePermissionCrossRef::class,
         AuditLogEntity::class,
-        SystemActivityEntity::class
+        SystemActivityEntity::class,
+        CachedFileEntity::class,
+        CachedRecordEntity::class,
+        UserSessionEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class RbacDatabase : RoomDatabase() {
     abstract fun rbacDao(): RbacDao
+    abstract fun fileCacheDao(): FileCacheDao
+    abstract fun userSessionDao(): UserSessionDao
 
     companion object {
         @Volatile
@@ -189,7 +194,7 @@ abstract class RbacDatabase : RoomDatabase() {
                     RbacDatabase::class.java,
                     "korvix_rbac_database"
                 )
-                .fallbackToDestructiveMigration()
+                .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
                 INSTANCE = instance
                 instance

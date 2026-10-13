@@ -51,6 +51,9 @@ import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.data.*
 import com.example.data.database.SystemActivityEntity
+import com.example.data.database.CachedFileEntity
+import com.example.data.database.UserSessionEntity
+import com.example.data.database.CachedRecordEntity
 
 /**
  * Parses simple markdown (e.g., **bold**) to stylized AnnotatedString.
@@ -3922,8 +3925,12 @@ fun SystemActivityWidget(
     modifier: Modifier = Modifier
 ) {
     val activities by viewModel.dbSystemActivities.collectAsState()
+    val cachedFiles by viewModel.dbCachedFiles.collectAsState()
+    val userSessions by viewModel.dbAllSessions.collectAsState()
+    val cachePerformanceStatus by viewModel.cachePerformanceStatus.collectAsState()
     val coroutineScope = rememberCoroutineScope()
     var isRunningDiagnostic by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableStateOf(0) } // 0: Activities, 1: Room Cached Files, 2: User Sessions
 
     Card(
         modifier = modifier
@@ -3958,13 +3965,13 @@ fun SystemActivityWidget(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Text(
-                            text = "Room Database Activity Engine",
+                            text = "Room SQLite Database Engine",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = KorvixTextDark
                         )
                         Text(
-                            text = "Summary analytics of file processing & compliance jobs",
+                            text = "Local high-performance cache, parsed records & user session ledger",
                             fontSize = 9.sp,
                             color = KorvixTextMuted,
                             fontWeight = FontWeight.Medium
@@ -3978,7 +3985,6 @@ fun SystemActivityWidget(
                         if (!isRunningDiagnostic) {
                             isRunningDiagnostic = true
                             coroutineScope.launch {
-                                // 1. Log a pending/running activity
                                 viewModel.logSystemActivity(
                                     type = "FILE_PROCESSING",
                                     title = "Diagnostics: Running automated pipeline check...",
@@ -3986,9 +3992,7 @@ fun SystemActivityWidget(
                                     records = 0,
                                     duration = 0L
                                 )
-                                delay(1200) // simulated processing delay
-                                
-                                // 2. Log completion activity
+                                delay(1200)
                                 viewModel.logSystemActivity(
                                     type = "FILE_PROCESSING",
                                     title = "Diagnostics: Auto-parsed timesheet_diagnostic_${(100..999).random()}.csv successfully",
@@ -4023,164 +4027,369 @@ fun SystemActivityWidget(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Summary Analytics Row
-            val totalJobs = activities.size
-            val successJobs = activities.count { it.status == "SUCCESS" }
-            val totalRecords = activities.sumOf { it.recordsProcessed }
-            val totalDuration = activities.sumOf { it.durationMs }
-            val successRate = if (totalJobs > 0) (successJobs.toFloat() / totalJobs * 100).toInt() else 100
-
+            // Navigation Tabs inside Engine Widget
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(KorvixBackground.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
-                    .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(12.dp))
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .background(KorvixBackground.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Stat 1
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
-                    Text("Total Jobs", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
-                    Text("$totalJobs", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KorvixPrimary)
-                }
-                // Vertical divider
-                Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
-                
-                // Stat 2
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1.2f)) {
-                    Text("Records Parsed", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
-                    Text(
-                        String.format(java.util.Locale.US, "%,d", totalRecords),
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = KorvixTextDark
-                    )
-                }
-                // Vertical divider
-                Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
-
-                // Stat 3
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1.1f)) {
-                    Text("Avg Speed", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
-                    Text(
-                        if (totalDuration > 0) String.format(java.util.Locale.US, "%.1f r/ms", totalRecords.toFloat() / totalDuration) else "0.0",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = KorvixOrange
-                    )
-                }
-                // Vertical divider
-                Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
-
-                // Stat 4
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
-                    Text("Success %", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
-                    Text("$successRate%", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KorvixGreen)
+                listOf(
+                    "Operations Logs (${activities.size})",
+                    "Room Cached Files (${cachedFiles.size})",
+                    "User Sessions (${userSessions.size})"
+                ).forEachIndexed { index, title ->
+                    val isSelected = selectedTab == index
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) KorvixPrimary else Color.Transparent)
+                            .clickable { selectedTab = index }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = title,
+                            fontSize = 10.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) Color.White else KorvixTextDark,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Activities List Header
-            Text(
-                text = "Recent Operations Logs in Room DB",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = KorvixTextDark,
-                modifier = Modifier.padding(bottom = 6.dp, start = 4.dp)
-            )
+            when (selectedTab) {
+                0 -> {
+                    // TAB 0: Summary Analytics & System Activities Logs
+                    val totalJobs = activities.size
+                    val successJobs = activities.count { it.status == "SUCCESS" }
+                    val totalRecords = activities.sumOf { it.recordsProcessed }
+                    val totalDuration = activities.sumOf { it.durationMs }
+                    val successRate = if (totalJobs > 0) (successJobs.toFloat() / totalJobs * 100).toInt() else 100
 
-            // Activities Table/List
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
-                    .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(8.dp))
-                    .padding(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (activities.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().padding(24.dp),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(KorvixBackground.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(12.dp))
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("No system activities found in Room database.", fontSize = 11.sp, color = KorvixTextMuted)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                            Text("Total Jobs", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
+                            Text("$totalJobs", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KorvixPrimary)
+                        }
+                        Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1.2f)) {
+                            Text("Records Parsed", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
+                            Text(
+                                String.format(java.util.Locale.US, "%,d", totalRecords),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = KorvixTextDark
+                            )
+                        }
+                        Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1.1f)) {
+                            Text("Avg Speed", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
+                            Text(
+                                if (totalDuration > 0) String.format(java.util.Locale.US, "%.1f r/ms", totalRecords.toFloat() / totalDuration) else "0.0",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = KorvixOrange
+                            )
+                        }
+                        Box(modifier = Modifier.width(1.dp).height(28.dp).background(KorvixBorder).align(Alignment.CenterVertically))
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                            Text("Success %", fontSize = 9.sp, color = KorvixTextMuted, fontWeight = FontWeight.Medium)
+                            Text("$successRate%", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = KorvixGreen)
+                        }
                     }
-                } else {
-                    activities.take(5).forEach { activity ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(KorvixBackground.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                                .padding(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(3f)
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "Recent Operations Logs in Room DB",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = KorvixTextDark,
+                        modifier = Modifier.padding(bottom = 6.dp, start = 4.dp)
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                            .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(8.dp))
+                            .padding(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (activities.isEmpty()) {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                // Type Icon
-                                Box(
+                                Text("No system activities found in Room database.", fontSize = 11.sp, color = KorvixTextMuted)
+                            }
+                        } else {
+                            activities.take(5).forEach { activity ->
+                                Row(
                                     modifier = Modifier
-                                        .size(24.dp)
-                                        .background(
-                                            when (activity.activityType) {
-                                                "FILE_PROCESSING" -> KorvixPrimaryLight
-                                                "SECURITY_ALERT" -> KorvixRedLight
-                                                "COMPLIANCE_SYNC" -> KorvixGreenLight
-                                                else -> KorvixBlue.copy(alpha = 0.1f)
-                                            },
-                                            RoundedCornerShape(4.dp)
-                                        ),
-                                    contentAlignment = Alignment.Center
+                                        .fillMaxWidth()
+                                        .background(KorvixBackground.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Icon(
-                                        imageVector = when (activity.activityType) {
-                                            "FILE_PROCESSING" -> Icons.Default.UploadFile
-                                            "SECURITY_ALERT" -> Icons.Default.Security
-                                            "COMPLIANCE_SYNC" -> Icons.Default.Sync
-                                            else -> Icons.Default.CheckCircle
-                                        },
-                                        contentDescription = null,
-                                        tint = when (activity.activityType) {
-                                            "FILE_PROCESSING" -> KorvixPrimary
-                                            "SECURITY_ALERT" -> KorvixRed
-                                            "COMPLIANCE_SYNC" -> KorvixGreen
-                                            else -> KorvixBlue
-                                        },
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(
-                                        text = activity.title,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = KorvixTextDark,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "By ${activity.operatorEmail}",
-                                            fontSize = 8.sp,
-                                            color = KorvixTextMuted
-                                        )
-                                        if (activity.recordsProcessed > 0) {
-                                            Text(
-                                                text = " • ${activity.recordsProcessed} recs",
-                                                fontSize = 8.sp,
-                                                color = KorvixPrimary,
-                                                fontWeight = FontWeight.Bold
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(3f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .background(
+                                                    when (activity.activityType) {
+                                                        "FILE_PROCESSING" -> KorvixPrimaryLight
+                                                        "SECURITY_ALERT" -> KorvixRedLight
+                                                        "COMPLIANCE_SYNC" -> KorvixGreenLight
+                                                        else -> KorvixBlue.copy(alpha = 0.1f)
+                                                    },
+                                                    RoundedCornerShape(4.dp)
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = when (activity.activityType) {
+                                                    "FILE_PROCESSING" -> Icons.Default.UploadFile
+                                                    "SECURITY_ALERT" -> Icons.Default.Security
+                                                    "COMPLIANCE_SYNC" -> Icons.Default.Sync
+                                                    else -> Icons.Default.CheckCircle
+                                                },
+                                                contentDescription = null,
+                                                tint = when (activity.activityType) {
+                                                    "FILE_PROCESSING" -> KorvixPrimary
+                                                    "SECURITY_ALERT" -> KorvixRed
+                                                    "COMPLIANCE_SYNC" -> KorvixGreen
+                                                    else -> KorvixBlue
+                                                },
+                                                modifier = Modifier.size(12.dp)
                                             )
                                         }
-                                        if (activity.durationMs > 0) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
                                             Text(
-                                                text = " in ${activity.durationMs}ms",
+                                                text = activity.title,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = KorvixTextDark,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = "By ${activity.operatorEmail}",
+                                                    fontSize = 8.sp,
+                                                    color = KorvixTextMuted
+                                                )
+                                                if (activity.recordsProcessed > 0) {
+                                                    Text(
+                                                        text = " • ${activity.recordsProcessed} recs",
+                                                        fontSize = 8.sp,
+                                                        color = KorvixPrimary,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                                if (activity.durationMs > 0) {
+                                                    Text(
+                                                        text = " in ${activity.durationMs}ms",
+                                                        fontSize = 8.sp,
+                                                        color = KorvixTextMuted
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Column(
+                                        horizontalAlignment = Alignment.End,
+                                        modifier = Modifier.weight(1.2f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(
+                                                    when (activity.status) {
+                                                        "SUCCESS" -> KorvixGreenLight
+                                                        "RUNNING" -> KorvixOrange.copy(alpha = 0.1f)
+                                                        else -> KorvixRedLight
+                                                    }
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = activity.status,
+                                                fontSize = 8.sp,
+                                                fontWeight = FontWeight.Black,
+                                                color = when (activity.status) {
+                                                    "SUCCESS" -> KorvixGreen
+                                                    "RUNNING" -> KorvixOrange
+                                                    else -> KorvixRed
+                                                }
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(activity.timestamp)),
+                                            fontSize = 8.sp,
+                                            color = KorvixTextMuted,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                1 -> {
+                    // TAB 1: Room Cached Files (Engine Cache)
+                    Column {
+                        // Cache Status Banner
+                        cachePerformanceStatus?.let { status ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(KorvixPrimaryLight, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Bolt, contentDescription = null, tint = KorvixPrimary, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = status,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = KorvixPrimary
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
+
+                        // Engine Actions Row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Cached Files in SQLite (${cachedFiles.size})",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = KorvixTextDark
+                            )
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Button(
+                                    onClick = { viewModel.simulateCSVFileUpload(forceRefresh = false) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = KorvixPrimary),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(28.dp).testTag("stream_and_cache_btn")
+                                ) {
+                                    Icon(Icons.Default.Cached, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color.White)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Test Cache Hit", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { viewModel.clearRoomFileCache() },
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(28.dp).testTag("clear_cache_btn")
+                                ) {
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(12.dp), tint = KorvixRed)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Purge Cache", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = KorvixRed)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (cachedFiles.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                                    .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(8.dp))
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("No files currently cached in Room SQLite database. Click 'Test Cache Hit' to parse and cache.", fontSize = 11.sp, color = KorvixTextMuted)
+                            }
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                cachedFiles.forEach { file ->
+                                    Card(
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = CardDefaults.cardColors(containerColor = KorvixBackground.copy(alpha = 0.4f)),
+                                        border = BorderStroke(1.dp, KorvixBorderAccent),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(Icons.Default.Description, contentDescription = null, tint = KorvixPrimary, modifier = Modifier.size(16.dp))
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(file.fileName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = KorvixTextDark)
+                                                }
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(KorvixGreenLight)
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                ) {
+                                                    Text(file.cacheStatus, fontSize = 8.sp, fontWeight = FontWeight.Black, color = KorvixGreen)
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.height(4.dp))
+
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = "Rows: ${String.format(java.util.Locale.US, "%,d", file.recordCount)} • Size: ${file.fileSizeBytes / 1024} KB",
+                                                    fontSize = 9.sp,
+                                                    color = KorvixTextMuted
+                                                )
+                                                Text(
+                                                    text = "Parse Latency: ${file.parsingDurationMs}ms",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = KorvixOrange
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.height(2.dp))
+
+                                            Text(
+                                                text = "SHA-256: ${file.checksum.take(18)}... | Owner: ${file.uploadedBy}",
                                                 fontSize = 8.sp,
                                                 color = KorvixTextMuted
                                             )
@@ -4188,42 +4397,126 @@ fun SystemActivityWidget(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
 
-                            // Status and Timestamp
-                            Column(
-                                horizontalAlignment = Alignment.End,
-                                modifier = Modifier.weight(1.2f)
+                2 -> {
+                    // TAB 2: User Session Ledger (SQLite)
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Persisted User Sessions in Room DB (${userSessions.size})",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = KorvixTextDark
+                            )
+                            Text(
+                                text = "Policy: Single Active / Role Guarded",
+                                fontSize = 9.sp,
+                                color = KorvixTextMuted
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (userSessions.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                                    .border(BorderStroke(1.dp, KorvixBorderAccent), RoundedCornerShape(8.dp))
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(
-                                            when (activity.status) {
-                                                "SUCCESS" -> KorvixGreenLight
-                                                "RUNNING" -> KorvixOrange.copy(alpha = 0.1f)
-                                                else -> KorvixRedLight
+                                Text("No sessions found in user_sessions table.", fontSize = 11.sp, color = KorvixTextMuted)
+                            }
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                userSessions.take(5).forEach { session ->
+                                    Card(
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = CardDefaults.cardColors(containerColor = KorvixBackground.copy(alpha = 0.4f)),
+                                        border = BorderStroke(1.dp, KorvixBorderAccent),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        imageVector = if (session.isActive) Icons.Default.VpnKey else Icons.Default.LockClock,
+                                                        contentDescription = null,
+                                                        tint = if (session.isActive) KorvixPrimary else KorvixTextMuted,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = "${session.userName} (${session.userRole})",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = KorvixTextDark
+                                                    )
+                                                }
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(if (session.isActive) KorvixGreenLight else KorvixBorder)
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (session.isActive) "ACTIVE" else "INACTIVE",
+                                                        fontSize = 8.sp,
+                                                        fontWeight = FontWeight.Black,
+                                                        color = if (session.isActive) KorvixGreen else KorvixTextMuted
+                                                    )
+                                                }
                                             }
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = activity.status,
-                                        fontSize = 8.sp,
-                                        fontWeight = FontWeight.Black,
-                                        color = when (activity.status) {
-                                            "SUCCESS" -> KorvixGreen
-                                            "RUNNING" -> KorvixOrange
-                                            else -> KorvixRed
+
+                                            Spacer(modifier = Modifier.height(4.dp))
+
+                                            Text(
+                                                text = "Email: ${session.userEmail} • Portal: ${session.activePortal} • Dept: ${session.department}",
+                                                fontSize = 9.sp,
+                                                color = KorvixTextDark
+                                            )
+
+                                            Spacer(modifier = Modifier.height(2.dp))
+
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "Token: ${session.sessionToken.take(16)}... | ${session.deviceInfo}",
+                                                    fontSize = 8.sp,
+                                                    color = KorvixTextMuted
+                                                )
+
+                                                if (session.isActive) {
+                                                    Text(
+                                                        text = "Terminate",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = KorvixRed,
+                                                        modifier = Modifier
+                                                            .clickable { viewModel.terminateSession(session.sessionId) }
+                                                            .padding(2.dp)
+                                                    )
+                                                }
+                                            }
                                         }
-                                    )
+                                    }
                                 }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(activity.timestamp)),
-                                    fontSize = 8.sp,
-                                    color = KorvixTextMuted,
-                                    fontWeight = FontWeight.Medium
-                                )
                             }
                         }
                     }

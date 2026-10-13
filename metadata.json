@@ -1,0 +1,6 @@
+{
+  "name": "KORVIX",
+  "description": "KORVIX Enterprise Role-Based Dashboard with Korvix AI Assistant, strict RBAC, and high-performance file parsing engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
